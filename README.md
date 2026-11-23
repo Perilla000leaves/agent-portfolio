@@ -12,7 +12,7 @@
 
 ```bash
 cd ~/agent-portfolio
-python -m venv .venv && ./.venv/bin/pip install -e ".[test]" pytest
+python3 -m venv .venv && ./.venv/bin/pip install -e ".[test]"
 ./.venv/bin/python -m pytest -q      # 21 passed
 bash scripts/verify.sh               # 单测 + LangGraph 演示
 ```
