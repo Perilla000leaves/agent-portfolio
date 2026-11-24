@@ -5,16 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-toolcore"
 version = "0.1.0"
-description = "从生产 ADK agent 提取的纯语义内核 + 三框架编排对照 + 回归用例"
+description = "从生产 Agent 抽取的语义内核 + 契约层 + 轨迹判定 + 三框架编排对照"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pydantic>=2"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
 frameworks = ["langgraph>=0.2,<2", "langchain-core>=0.3", "google-adk>=2.15,<3"]
 
 [tool.setuptools]
-packages = ["toolcore", "chaincore", "ragcore"]
+packages = ["toolcore", "chaincore", "ragcore", "evalcore"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

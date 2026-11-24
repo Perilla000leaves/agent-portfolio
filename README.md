@@ -1,6 +1,6 @@
 # agent-portfolio
 
-一个从生产 Agent 系统里剥离出来的工程样本：**无 I/O 的语义内核 + 同一链路的三套编排实现 + 守住语义不漂移的回归用例**。
+一个从生产 Agent 系统里剥离出来的工程样本：**语义内核 + Pydantic 入参契约 + 轨迹判定 + 同一链路的三套编排实现**，全部配可运行的回归用例。
 
 ## 这个仓库要解决什么问题
 
@@ -16,11 +16,12 @@
 
 | 目录 | 内容 | 依赖 |
 |---|---|---|
-| `toolcore/` | 参数契约校验、时间与小时归一化、SQL 拼接、结果摘要、图片类型判定 | 仅标准库 |
+| `toolcore/` | 时间与小时归一化、SQL 拼接、结果摘要、图片类型判定；`contract.py` 是 Pydantic 入参契约 | pydantic |
 | `chaincore/` | 一条完整业务链路的阶段语义（素材 → 创意 → 日期分流 → 确认 → 查询 → 合并 → 摘要） | 仅标准库 |
+| `evalcore/` | 轨迹判定：期望与实际成对归一化、三种匹配语义、重复调用与 SQL 上报指标 | 仅标准库 |
 | `ragcore/` | 把代码里的规则编译成可检索知识库：静态解析、词角色推断、分块编译、词频统计 | 仅标准库 |
 | `adk/`、`langchain/`、`langgraph/` | 同一条链路在三种编排框架下的实现 | 各框架 |
-| `tests/` | 42 条用例，覆盖静默失败、跨框架语义漂移与知识库构建 | pytest |
+| `tests/` | 58 条用例，覆盖静默失败、参数契约、轨迹判定、跨框架漂移与知识库构建 | pytest |
 | `docs/` | 生产系统的架构取舍、三个工程案例、知识库构建笔记 | — |
 
 ## 快速开始
@@ -30,7 +31,7 @@ git clone https://github.com/Perilla000leaves/agent-portfolio.git
 cd agent-portfolio
 python3 -m venv .venv && ./.venv/bin/pip install -e ".[test,frameworks]"
 
-./.venv/bin/python -m pytest -q      # 42 passed
+./.venv/bin/python -m pytest -q      # 58 passed
 bash scripts/verify.sh               # 单测 + 三套框架 demo
 ```
 
@@ -62,6 +63,22 @@ pip install -e ".[test]"
 `__path__`。所以入口文件叫 `chain.py` 而不是 `graph.py`（否则会撞上库的 `langgraph/graph/`），运行也必须
 用脚本方式：`python langgraph/chain.py --demo`。
 
+## 参数契约与轨迹判定
+
+两块都是「让不确定的模型输出可被验证」的基础设施，也是这个仓库里最贴近线上事故的两块。
+
+**入参契约（`toolcore/contract.py`）**：Pydantic 模型 + `field_validator`，在调用前拦下
+「确定会炸 / 会静默失真」的参数。三条约束写在模块 docstring 里——不改工具签名
+（`functools.wraps` 让框架拿到的仍是原始签名，模型看到的说明书一个字不变）、只校验不改写入参、
+失败返回 error payload 而不抛异常（抛异常会被框架 re-raise 成整轮 error，模型拿不到可自纠的提示）。
+
+**轨迹判定（`evalcore/`）**：先做**成对归一化**再匹配。期望只写工具名、实际调用带
+`bns_date_start` 这类会漂的参数时，严格相等会把对的判成错的；归一化让两侧用同一套规则，
+比较才恢复意义。匹配支持 EXACT / IN_ORDER / ANY_ORDER 三种语义，另有两个自建指标：
+`query_adx_*` 必须真的上报 SQL（框架的参数比较看不出这一点）、同一工具不得重复调用。
+
+`pass=None` 表示**未判定**，与 `False` 严格区分——把「没测」混进通过率是评测里最常见的自欺。
+
 ## 从代码规则到可检索知识库（RAG）
 
 `ragcore/` 解决一个具体问题：业务规则写在代码里（Python 字面量 + 配置文件 + 线上缓存），
@@ -83,16 +100,17 @@ pip install -e ".[test]"
 
 | 组 | 条数 | 覆盖 |
 |---|---|---|
-| 参数契约 | 9 | 非数字 id、坏小时、非法日期、非法 source、未知字段、空筛选；合法参数必须原样放行且不执行被装饰函数 |
+| 参数契约 | 11 | Pydantic 校验器：非数字 id、坏小时、非法日期、非法 source、非法 stage、未知字段、空筛选；合法参数原样放行、失败不执行函数体、错误预览只进 state |
 | 时间与字段 | 6 | 分钟窗口、多小时展开、跨小时区间、单日折叠、字段别名补 ts、日期格式兼容 |
 | SQL / 摘要 / MIME | 6 | 空 IN、引号与反斜杠转义、分钟分区条件、HTML 表格摘要、超长截断、图片魔数 |
+| 轨迹判定 | 14 | 成对归一化（keys / full）、EXACT / IN_ORDER / ANY_ORDER、重复调用、SQL 上报、未判定与失败严格区分 |
 | 跨框架一致 | 4 | 三个场景 × 三种编排，输出必须逐字段相同；挂起场景必须真的挂起 |
 | 知识库构建 | 17 | 只解析不执行、通道被引用才导出词、四类词角色推断、分块不丢词、df 只计触发词 |
 
 跨框架那 4 条是这个仓库的核心断言：`status / route / creatives / merged / message` 在三个实现之间必须完全
 一致。任何一处控制流写错——`RunnableBranch` 分支顺序颠倒、ADK 守卫漏判——都会在这里失败。
 
-用例刻意只写 42 条而不追求覆盖率：测的是会静默出错的地方，不是代码行。
+用例刻意只写 58 条而不追求覆盖率：测的是会静默出错的地方，不是代码行。
 
 ## 设计取舍
 
@@ -108,6 +126,7 @@ pip install -e ".[test]"
 - LangGraph 版**没有使用 checkpointer 与 `interrupt()`**：挂起是用状态标志模拟的，不是持久化中断恢复。这是已知的下一步。
 - ADK 2.15 中 `SequentialAgent` 已标记 deprecated（官方建议迁移到 `Workflow`，当前版本尚未完全可用）。
 - `docs/` 里的架构与案例来自一个真实生产系统，已省略内部服务地址、模块名与业务数据。
+- `toolcore` 依赖 pydantic（生产实现用同一套校验器）；`chaincore`、`evalcore`、`ragcore` 仍只依赖标准库。
 
 ## 文档
 

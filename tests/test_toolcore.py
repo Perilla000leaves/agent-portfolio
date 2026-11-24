@@ -1,19 +1,16 @@
-"""21 条回归用例：全部围绕「参数错了但没报错、查询范围被静默放大」。
+"""12 条回归用例：全部围绕「参数错了但没报错、查询范围被静默放大」。
 
-分三组：
-- 契约（9）：脏参数必须被拦，合法参数必须原样放行且不执行被装饰函数；
+分两组（契约用例已迁到 test_contract.py，由 Pydantic 校验器承担）：
 - 时间/字段（6）：分钟窗口、多小时展开、单日折叠、字段别名；
 - SQL/摘要/MIME（6）：空 IN、转义、分钟分区条件、表格摘要、截断、图片魔数。
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 
 from toolcore import (
     ToolResult,
     collapse_single_day_date,
-    detail_query_contract,
     event_time_bounds,
     extend_hour_by_range,
     mime_by_url,
@@ -26,84 +23,7 @@ from toolcore import (
     sql_quote,
     strip_tables_for_model,
     summarize_text,
-    validate_detail_args,
 )
-
-# ---------------------------------------------------------------- 契约（9）
-
-
-def test_numeric_ids_reject_names_and_accept_pandas_suffix():
-    errors = validate_detail_args({"app_id": "示例媒体-安卓", "creative_md5": "abc"})
-    assert any("只能是数字 id" in message for message in errors)
-
-    # pandas 导出的 "9044.0" 是历史兼容写法，不能误拦
-    assert validate_detail_args({"app_id": "9044.0,9045", "creative_md5": "abc"}) == []
-
-
-def test_bad_hour_rejected_but_zero_is_valid():
-    errors = validate_detail_args({"bns_hour": "3点-5点", "creative_md5": "abc"})
-    assert any("无法解析为小时" in message for message in errors)
-
-    # 0 点是合法取值，不能被当成空值
-    assert validate_detail_args({"bns_hour": 0, "creative_md5": "abc"}) == []
-
-
-def test_invalid_calendar_date_rejected():
-    errors = validate_detail_args({"bns_date_start": "20261345", "creative_md5": "abc"})
-    assert any("无法识别" in message for message in errors)
-
-
-def test_invalid_source_rejected():
-    errors = validate_detail_args({"source": "6", "creative_md5": "abc"})
-    assert any("source='6'" in message for message in errors)
-
-
-def test_unknown_requested_fields_rejected():
-    errors = validate_detail_args({"requested_fields": "foo,bar", "creative_md5": "abc"})
-    assert any("没有可识别的字段" in message for message in errors)
-
-
-def test_no_filter_rejected():
-    errors = validate_detail_args({})
-    assert any("至少需要提供一个筛选条件" in message for message in errors)
-
-
-def test_valid_args_pass_and_values_untouched():
-    args = {
-        "creative_md5": "abc",
-        "app_id": "9044",
-        "bns_hour": "08,09",
-        "source": "4.0",
-        "requested_fields": "dspid",
-    }
-    snapshot = dict(args)
-    assert validate_detail_args(args) == []
-    assert args == snapshot  # 只校验，不写回归一化值
-
-
-def test_contract_decorator_missing_required_returns_error():
-    @detail_query_contract
-    async def fake(stage: str, creative_md5: str | None = None):
-        return {"ok": True}
-
-    payload = asyncio.run(fake(creative_md5="abc"))
-    assert payload["status"] == "error"
-    assert "缺少必填参数" in payload["summary"]
-
-
-def test_contract_decorator_invalid_arg_blocks_execution():
-    calls: list[dict] = []
-
-    @detail_query_contract
-    async def fake(stage: str = "点击", creative_md5=None, app_id=None):
-        calls.append({"stage": stage, "app_id": app_id})
-        return {"ok": True}
-
-    payload = asyncio.run(fake(app_id="示例媒体-安卓", creative_md5="abc"))
-    assert payload["status"] == "error"
-    assert "只能是数字 id" in payload["summary"]
-    assert calls == []  # 校验失败绝不能执行到函数体
-
 
 # ------------------------------------------------------------ 时间/字段（6）
 

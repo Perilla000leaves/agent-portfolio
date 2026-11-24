@@ -10,11 +10,9 @@
 """
 from __future__ import annotations
 
-import functools
 import html as _html
-import inspect
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -309,121 +307,6 @@ _STAGE_ALIASES = {"填充": "填充", "fill": "填充", "点击": "点击", "cli
 
 
 # =========================================================================
-# 4. 契约校验：脏参数不得静默进入 SQL
-# =========================================================================
-
-CONTRACT_ERROR_PREFIX = "[参数校验未通过] "
-
-
-def _id_tokens(value: Any) -> list[str]:
-    tokens = []
-    for token in split_csv_values(value):
-        if token.endswith(".0") and token[:-2].isdigit():
-            token = token[:-2]
-        tokens.append(token)
-    return tokens
-
-
-def validate_detail_args(args: dict[str, Any]) -> list[str]:
-    """返回错误列表；空列表表示通过。只校验，不改写入参。"""
-    errors: list[str] = []
-
-    for name in ("app_id", "place_id", "dsp_id"):
-        value = args.get(name)
-        if value in (None, "", [], ()):
-            continue
-        tokens = _id_tokens(value)
-        invalid = [token for token in tokens if not token.isdigit()]
-        if invalid:
-            errors.append(
-                "app_id/place_id/dsp_id 只能是数字 id，多个用英文逗号分隔，"
-                f"收到 {', '.join(invalid[:3])}。媒体名/广告位名请先用 "
-                "space_name_to_space_id 解析成 id。"
-            )
-            break
-
-    for name in ("bns_date_start", "bns_date_end"):
-        value = args.get(name)
-        if value in (None, "", [], ()):
-            continue
-        if parse_date(value) is None:
-            errors.append(
-                f"日期 {value!r} 无法识别，请传 YYYYMMDD（如 20261110）或 YYYY-MM-DD。"
-            )
-            break
-
-    hour = args.get("bns_hour")
-    if hour not in (None, "", [], ()) and normalize_hour(hour) is None:
-        errors.append(
-            f"bns_hour={hour!r} 无法解析为小时，解析失败会被当成不过滤小时，从而扫全天分区。"
-            "请传整点（9）或两位小时列表（\"08,09,10\"）。"
-        )
-
-    source = args.get("source")
-    if source not in (None, "", [], ()) and not normalize_source_filter(source):
-        errors.append(
-            f"source={source!r} 无法识别，只能是 \"4\"（4.0）或 \"5\"（5.0）。"
-        )
-
-    stage = args.get("stage")
-    if stage not in (None, "", [], ()):
-        if str(stage).strip().lower() not in _STAGE_ALIASES:
-            errors.append(f"stage={stage!r} 无法识别，只能是 \"填充\" 或 \"点击\"。")
-
-    requested = args.get("requested_fields")
-    if requested not in (None, "", [], ()) and not normalize_detail_requested_fields(requested):
-        valid = "、".join(_DETAIL_OUTPUT_FIELDS + _DETAIL_OPTIONAL_FIELDS)
-        errors.append(
-            f"requested_fields={requested!r} 里没有可识别的字段；可选：{valid}。"
-        )
-
-    if not any(split_csv_values(args.get(name)) for name in _DETAIL_FILTER_FIELDS):
-        errors.append(
-            "至少需要提供一个筛选条件：creative_md5、origin_creative_md5、landing、"
-            "dplink、oaid、app_id、place_id、dsp_id、make、model、os、osv、idfa、ip。"
-        )
-    return errors
-
-
-def contract_error_payload(message: str) -> dict[str, Any]:
-    """校验失败结果：status=error + 摘要；不抛异常（ADK 会 re-raise 成整轮 error）。"""
-    text = message if message.startswith(CONTRACT_ERROR_PREFIX) else CONTRACT_ERROR_PREFIX + message
-    return ToolResult.from_text(text, status="error").to_model_payload()
-
-
-def detail_query_contract(func: Callable) -> Callable:
-    """明细工具契约装饰器：签名不变，校验失败返回 error payload。"""
-    signature = inspect.signature(func)
-
-    @functools.wraps(func)
-    async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        tool_context = kwargs.get("tool_context")
-        try:
-            bound = signature.bind_partial(*args, **kwargs)
-            payload = {k: v for k, v in bound.arguments.items() if k != "tool_context"}
-            tool_context = tool_context or bound.arguments.get("tool_context")
-        except TypeError:
-            payload = {k: v for k, v in kwargs.items() if k != "tool_context"}
-
-        missing = [
-            name
-            for name, param in signature.parameters.items()
-            if param.default is inspect.Parameter.empty
-            and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-            and name not in payload
-        ]
-        if missing:
-            return contract_error_payload(f"缺少必填参数：{'、'.join(missing)}。")
-
-        errors = validate_detail_args(payload)
-        if errors:
-            return contract_error_payload("；".join(errors))
-        return await func(*args, **kwargs)
-
-    return wrapper
-
-
-# =========================================================================
 # 5. SQL 文本拼接
 # =========================================================================
 
@@ -585,6 +468,33 @@ class ToolResult:
 
 
 # =========================================================================
+# 4. 预览暂存：模型看摘要，前端看完整 HTML
+# =========================================================================
+
+#: 预览 HTML 在 state 中的键前缀。用 `temp:`（单次调用级）而不是全局前缀，
+#: 否则跨用户串台；键里不带 invocation_id，避免长会话里键只增不减。
+PREVIEW_STATE_PREFIX = "temp:tool_preview:"
+
+
+def preview_state_key(tool_name: str) -> str:
+    """预览 HTML 在 state 中的键（同一轮同一工具重复调用会覆盖，可接受）。"""
+    return f"{PREVIEW_STATE_PREFIX}{tool_name or 'unknown'}"
+
+
+def stash_preview_html(state: Any, tool_name: str, html_text: str) -> None:
+    """把预览 HTML 写进 state，交给前端回显；模型侧只拿到摘要。
+
+    state 不支持写入时静默跳过：预览退化为摘要文本，不影响工具结果本身。
+    """
+    if not html_text or not tool_name or state is None or not hasattr(state, "__setitem__"):
+        return
+    try:
+        state[preview_state_key(tool_name)] = html_text
+    except Exception:  # pragma: no cover - 防御只读 state
+        pass
+
+
+# =========================================================================
 # 7. 图片输入：类型判定
 # =========================================================================
 
@@ -623,8 +533,7 @@ __all__ = [
     "normalize_query_date", "parse_date", "normalize_adx_partition_hours",
     "extract_hour", "normalize_hour", "extend_hour_by_range", "collapse_single_day_date",
     "normalize_detail_requested_fields", "normalize_source_filter",
-    "validate_detail_args", "contract_error_payload", "detail_query_contract",
-    "CONTRACT_ERROR_PREFIX",
+    "PREVIEW_STATE_PREFIX", "preview_state_key", "stash_preview_html",
     "sql_quote", "sql_in_clause", "sql_in_params", "minute_partition_condition",
     "ToolResult", "summarize_text", "strip_tables_for_model", "first_table", "find_oss_url",
     "sniff_image_mime", "mime_by_url",
