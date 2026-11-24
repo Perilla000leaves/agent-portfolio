@@ -1,96 +1,96 @@
 # agent-portfolio
 
-面试用的「可验证工程证据」。不是 demo：把生产 agent 的**稳定语义**抽成无 I/O 内核，再把同一条链路用三种编排框架各实现一次，本地一条命令可验证。
+一个从生产 Agent 系统里剥离出来的工程样本：**无 I/O 的语义内核 + 同一链路的三套编排实现 + 守住语义不漂移的回归用例**。
 
-| 件 | 目录 | 交付物 |
+## 这个仓库要解决什么问题
+
+跑在框架和内部数据源上的 Agent，代码很难独立验证。最常见的事故不是"算错"，而是**静默失真**：
+
+- 参数传了 `bns_hour="3点-5点"`，解析失败后被当成"不过滤小时"，一次查询扫掉全天分区；
+- 媒体名没解析成 `app_id`，SQL 从"查这个媒体"退化成"查全量媒体"；
+- 模型声称调用了工具，但实际拿回来的是空的 `functionResponse`。
+
+这三种情况日志里都一切正常，等到有人发现数据不对，已经过去几天。这个仓库把它们拆成可以独立运行、可以断言的东西。
+
+## 仓库里有什么
+
+| 目录 | 内容 | 依赖 |
 |---|---|---|
-| ① 工程证据 | `toolcore/` + `tests/` + `.github/workflows/ci.yml` | 25 条测试 + CI 门禁，`pytest` 秒级跑完 |
-| ② 框架广度 | `adk/`、`langchain/`、`langgraph/` | 同一链路的三种编排实现，**输出逐字段一致** |
-| ③ 项目故事 | `docs/architecture.md`、`docs/interview-notes.md` | 架构图（Mermaid）+ 3 个 STAR + ADK vs LangGraph |
+| `toolcore/` | 参数契约校验、时间与小时归一化、SQL 拼接、结果摘要、图片类型判定 | 仅标准库 |
+| `chaincore/` | 一条完整业务链路的阶段语义（素材 → 创意 → 日期分流 → 确认 → 查询 → 合并 → 摘要） | 仅标准库 |
+| `adk/`、`langchain/`、`langgraph/` | 同一条链路在三种编排框架下的实现 | 各框架 |
+| `tests/` | 25 条用例，覆盖静默失败与跨框架语义漂移 | pytest |
+| `docs/` | 生产系统的架构取舍与三个工程案例 | — |
 
-## 30 秒验证
+## 快速开始
 
 ```bash
-cd ~/agent-portfolio
+git clone https://github.com/Perilla000leaves/agent-portfolio.git
+cd agent-portfolio
 python3 -m venv .venv && ./.venv/bin/pip install -e ".[test,frameworks]"
+
 ./.venv/bin/python -m pytest -q      # 25 passed
-bash scripts/verify.sh               # 单测 + 三套框架演示
+bash scripts/verify.sh               # 单测 + 三套框架 demo
 ```
 
-只关心内核、不想装框架依赖时：`pip install -e ".[test]"`，跨框架用例会自动跳过。
+只需要内核、不想装框架依赖：
 
-## 同一语义，三种编排
+```bash
+pip install -e ".[test]"
+```
 
-`chaincore/` 里是三个实现共享的**阶段语义**（每个阶段做什么、返回什么），
-三个目录只回答同一句话：**「下一步走哪，由谁决定」**。
+跨框架用例会自动跳过，内核的 21 条用例照常运行。
 
-| 目录 | 框架 | 控制流怎么表达 | 分支在哪 |
+## 三种编排实现
+
+`chaincore/` 里是三个实现共享的**阶段语义**（每个阶段做什么、返回什么），三个目录只回答同一个问题：**下一
+步走哪，由谁决定**。
+
+| 目录 | 框架 | 控制流怎么表达 | 分支落在哪 |
 |---|---|---|---|
-| `langgraph/` | LangGraph | 显式状态图 + 条件边 | 边 |
-| `langchain/` | LangChain（LCEL） | `RunnableBranch` 运行时选 | 运行时条件（有顺序陷阱） |
-| `adk/` | Google ADK | 顺序 Agent + 节点内守卫 | 节点内部 if |
+| `langgraph/` | LangGraph | 显式状态图 + 条件边 | 边，编译期定型 |
+| `langchain/` | LangChain（LCEL） | `RunnableBranch` | 运行时条件，分支顺序本身即语义 |
+| `adk/` | Google ADK | 顺序 Agent + 节点内守卫 | 节点内部 `if` |
 
-正因为语义都下沉到 `chaincore`，三个实现可以**逐行 diff**，差异全是编排，不掺业务。
+因为语义都下沉到 `chaincore`，三个实现可以逐行 diff，差异只有编排。
 
-`tests/test_frameworks.py` 把这件事变成断言：三个场景下，三个实现的
-`status / route / creatives / merged / message` 必须完全相同。
-任何一处控制流写错（比如 `RunnableBranch` 分支顺序颠倒、ADK 守卫漏判）都会在这里失败。
+其中最值得注意的是 ADK：它的 `SequentialAgent` **没有条件边**，分支只能收敛到节点内部判断，或者交给模型
+用 `transfer` 决定走哪个子 Agent。这不是实现取舍，是框架表达力的边界，代码里能直接看到。
 
-> 命名注意：安装的 `langgraph` 是**命名空间包**（没有 `__init__.py`），仓库里的 `langgraph/`
-> 目录会被并进它的 `__path__`。因此 ① 必须用脚本方式运行（`python langgraph/chain.py --demo`），
-> `python -m langgraph.chain` 会把本目录当包导入；② 本目录里不能出现与库同名的子模块
-> （`graph.py` 会撞上库的 `langgraph/graph/`），所以入口文件叫 `chain.py`。
+命名坑：安装的 `langgraph` 是命名空间包（没有 `__init__.py`），仓库里的 `langgraph/` 目录会被并进它的
+`__path__`。所以入口文件叫 `chain.py` 而不是 `graph.py`（否则会撞上库的 `langgraph/graph/`），运行也必须
+用脚本方式：`python langgraph/chain.py --demo`。
 
-## 目录
-
-```
-agent-portfolio/
-├── README.md
-├── pyproject.toml               # 包定义 + pytest/ruff 配置 + frameworks 可选依赖
-├── toolcore/__init__.py         # 契约校验 / 日期小时 / SQL 拼接 / 结果摘要 / MIME
-├── chaincore/__init__.py        # 素材链路语义（三个框架共享）
-├── adk/
-│   ├── chain.py                 # 顺序 Agent + 状态守卫
-│   ├── requirements.txt
-│   └── README.md
-├── langchain/
-│   ├── chain.py                 # LCEL 组合 + RunnableBranch
-│   ├── requirements.txt
-│   └── README.md
-├── langgraph/
-│   ├── chain.py                 # StateGraph + 条件边 + 确认挂起
-│   ├── requirements.txt
-│   └── README.md
-├── tests/
-│   ├── test_toolcore.py         # 21 条内核用例
-│   └── test_frameworks.py       # 跨框架一致性断言
-├── docs/
-│   ├── architecture.md          # 生产架构 + 设计决策 + 失败模式
-│   └── interview-notes.md       # 3 个 STAR + 框架边界
-├── .github/workflows/ci.yml     # GitHub Actions：ruff + pytest + 三套 demo（3.11/3.12）
-└── scripts/verify.sh
-```
-
-## 25 条测试在防什么
-
-核心不是「算得对不对」，而是**参数错了但没报错、查询范围被静默放大**这类线上最常见的失败：
+## 测试在守护什么
 
 | 组 | 条数 | 覆盖 |
 |---|---|---|
-| 契约 | 9 | 非数字 id、坏小时、非法日期、非法 source、未知字段、空筛选、合法放行且不改写入参、缺必填、校验失败不执行 |
-| 时间/字段 | 6 | 分钟窗口、多小时展开、跨小时区间、单日折叠、字段别名+补 ts、日期格式兼容 |
-| SQL/摘要/MIME | 6 | 空 IN、引号与反斜杠转义、分钟分区条件、HTML 表格摘要、超长截断、图片魔数/后缀 |
-| 跨框架一致 | 4 | 三个场景 × 三种编排输出一致；挂起场景必须真的挂起 |
+| 参数契约 | 9 | 非数字 id、坏小时、非法日期、非法 source、未知字段、空筛选；合法参数必须原样放行且不执行被装饰函数 |
+| 时间与字段 | 6 | 分钟窗口、多小时展开、跨小时区间、单日折叠、字段别名补 ts、日期格式兼容 |
+| SQL / 摘要 / MIME | 6 | 空 IN、引号与反斜杠转义、分钟分区条件、HTML 表格摘要、超长截断、图片魔数 |
+| 跨框架一致 | 4 | 三个场景 × 三种编排，输出必须逐字段相同；挂起场景必须真的挂起 |
 
-## 与生产仓库的关系
+跨框架那 4 条是这个仓库的核心断言：`status / route / creatives / merged / message` 在三个实现之间必须完全
+一致。任何一处控制流写错——`RunnableBranch` 分支顺序颠倒、ADK 守卫漏判——都会在这里失败。
 
-`toolcore/` 是从 `ad_agent_sample3/tools3/` 的纯函数**提取语义**后的无 I/O 实现（去掉 OSS/ADK/数据库依赖），断言与生产口径一致；为了可独立运行做了精简，不是逐行复制。
+用例刻意只写 25 条而不追求覆盖率：测的是会静默出错的地方，不是代码行。
 
-`adk/`、`langchain/`、`langgraph/` 里验证的不是生产代码的搬运，而是**同一条确定性链路在三种编排模型下的表达方式**：生产用 ADK（模型自主编排 + 回调链），这里把「如果换一套控制流模型，会写成什么样、代价是什么」变成可运行、可 diff 的代码。
+## 设计取舍
 
-## 面试怎么用
+- **失败返回字符串而不是抛异常**：模型能从可读错误里自我修正；抛异常会让整轮对话变成 error。
+- **结果分两个读者**：模型只看「行数 + 列名 + 下载链接」，前端拿完整表格。表格进上下文既费 token，也会被模型复述。
+- **挂起用状态而不是阻塞**：长查询提交后立即返回，进度和结果落对象存储，前端轮询，服务重启后可续跑。
+- **三套实现共享语义**：如果每套各写一份业务逻辑，对比就失去了意义——差异会被业务代码淹没。
 
-- **30 秒**：一句话 + `docs/architecture.md` 第一张图。
-- **3 分钟**：讲一个 STAR（推荐「进度恢复」），落点是「约束 → 决策 → 可验证结果」。
-- **10 分钟**：`pytest -q` 跑一遍，再讲「为什么是这 25 条而不是 200 条」——测的是静默失败与跨框架语义漂移，不是覆盖率数字。
-- **15 分钟**：打开三个框架目录，讲「同一业务语义，控制流归模型还是归代码」的差异与选型边界。
+## 范围与限制
+
+- 数据源是固定样本，验证的是编排语义与参数契约，**不代表真实查询性能**。
+- 三个实现都没有接入真实模型：ADK 版用 `SequentialAgent` 跑确定性阶段，对照点是执行模型本身，不是推理质量。
+- LangGraph 版**没有使用 checkpointer 与 `interrupt()`**：挂起是用状态标志模拟的，不是持久化中断恢复。这是已知的下一步。
+- ADK 2.15 中 `SequentialAgent` 已标记 deprecated（官方建议迁移到 `Workflow`，当前版本尚未完全可用）。
+- `docs/` 里的架构与案例来自一个真实生产系统，已省略内部服务地址、模块名与业务数据。
+
+## 文档
+
+- [`docs/architecture.md`](docs/architecture.md)：生产系统的分层、关键决策与失败模式
+- [`docs/case-studies.md`](docs/case-studies.md)：OOM、长任务恢复、口径漂移三个案例
