@@ -14,7 +14,7 @@ test = ["pytest>=8"]
 frameworks = ["langgraph>=0.2,<2", "langchain-core>=0.3", "google-adk>=2.15,<3"]
 
 [tool.setuptools]
-packages = ["toolcore", "chaincore", "ragcore", "evalcore"]
+packages = ["toolcore", "chaincore", "ragcore", "evalcore", "contextcore"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
