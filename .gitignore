@@ -12,3 +12,7 @@ dist/
 
 # os
 .DS_Store
+
+# personal documents (this repo is public — keep resumes and contact info out of git)
+docs/*.pdf
+docs/*.docx

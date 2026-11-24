@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一条命令验证：
-#   1) 单测（优先用项目内 .venv，没有就退回系统 python）
-#   2) LangGraph 复刻演示（装了 langgraph 才跑，否则跳过）
+#   1) 单测（含跨框架一致性断言，缺依赖的框架会自动跳过）
+#   2) 三套编排实现的演示（装了对应框架才跑，否则跳过）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,12 +18,19 @@ fi
 echo "== unit tests =="
 "$PY" -m pytest -q
 
-if "$PY" -c "import langgraph" >/dev/null 2>&1; then
-  echo
-  echo "== langgraph replica demo =="
-  "$PY" langgraph-replica/graph.py --demo
-else
-  echo
-  echo "== skip langgraph demo =="
-  echo "   pip install -r langgraph-replica/requirements.txt"
-fi
+demo() {
+  local label="$1" file="$2" module="$3"
+  if "$PY" -c "import $module" >/dev/null 2>&1; then
+    echo
+    echo "== $label =="
+    "$PY" "$file" --demo
+  else
+    echo
+    echo "== skip $label =="
+    echo "   pip install -r $(dirname "$file")/requirements.txt"
+  fi
+}
+
+demo "langgraph demo" langgraph/chain.py langgraph.graph
+demo "langchain demo" langchain/chain.py langchain_core.runnables
+demo "adk demo" adk/chain.py google.adk.agents

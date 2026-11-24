@@ -5,15 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-toolcore"
 version = "0.1.0"
-description = "从生产 ADK agent 提取的纯语义内核 + 回归用例"
+description = "从生产 ADK agent 提取的纯语义内核 + 三框架编排对照 + 回归用例"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+frameworks = ["langgraph>=0.2,<2", "langchain-core>=0.3", "google-adk>=2.15,<3"]
 
 [tool.setuptools]
-packages = ["toolcore"]
+packages = ["toolcore", "chaincore"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -27,3 +28,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501"]
+
+# 三个实现都要在脚本方式运行时把仓库根加入 sys.path，导入必然晚于该语句
+[tool.ruff.lint.per-file-ignores]
+"adk/chain.py" = ["E402"]
+"langchain/chain.py" = ["E402"]
+"langgraph/chain.py" = ["E402"]
+"tests/test_frameworks.py" = ["E402"]
