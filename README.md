@@ -18,9 +18,10 @@
 |---|---|---|
 | `toolcore/` | 参数契约校验、时间与小时归一化、SQL 拼接、结果摘要、图片类型判定 | 仅标准库 |
 | `chaincore/` | 一条完整业务链路的阶段语义（素材 → 创意 → 日期分流 → 确认 → 查询 → 合并 → 摘要） | 仅标准库 |
+| `ragcore/` | 把代码里的规则编译成可检索知识库：静态解析、词角色推断、分块编译、词频统计 | 仅标准库 |
 | `adk/`、`langchain/`、`langgraph/` | 同一条链路在三种编排框架下的实现 | 各框架 |
-| `tests/` | 25 条用例，覆盖静默失败与跨框架语义漂移 | pytest |
-| `docs/` | 生产系统的架构取舍与三个工程案例 | — |
+| `tests/` | 42 条用例，覆盖静默失败、跨框架语义漂移与知识库构建 | pytest |
+| `docs/` | 生产系统的架构取舍、三个工程案例、知识库构建笔记 | — |
 
 ## 快速开始
 
@@ -29,7 +30,7 @@ git clone https://github.com/Perilla000leaves/agent-portfolio.git
 cd agent-portfolio
 python3 -m venv .venv && ./.venv/bin/pip install -e ".[test,frameworks]"
 
-./.venv/bin/python -m pytest -q      # 25 passed
+./.venv/bin/python -m pytest -q      # 42 passed
 bash scripts/verify.sh               # 单测 + 三套框架 demo
 ```
 
@@ -39,7 +40,7 @@ bash scripts/verify.sh               # 单测 + 三套框架 demo
 pip install -e ".[test]"
 ```
 
-跨框架用例会自动跳过，内核的 21 条用例照常运行。
+跨框架用例会自动跳过，内核用例照常运行。
 
 ## 三种编排实现
 
@@ -61,6 +62,23 @@ pip install -e ".[test]"
 `__path__`。所以入口文件叫 `chain.py` 而不是 `graph.py`（否则会撞上库的 `langgraph/graph/`），运行也必须
 用脚本方式：`python langgraph/chain.py --demo`。
 
+## 从代码规则到可检索知识库（RAG）
+
+`ragcore/` 解决一个具体问题：业务规则写在代码里（Python 字面量 + 配置文件 + 线上缓存），
+想让它可检索，既不能 `import` 那份代码，也不能把 `lambda` 表达式直接喂给模型。
+
+| 阶段 | 做什么 | 为什么这么做 |
+|---|---|---|
+| 规则提取 | `ast.parse` 取规则列表里的字面量 | 导入规则模块会连缓存、拉词表、建自动机 |
+| 角色推断 | 从 `not (…)` / `A - {…}` / 三元推断 扣除 / 否决 / 开关 | 同一个词在不同标签里可能是反例，不能一律算占用 |
+| 分块编译 | 代表词 + 词表续块，按字符预算切分，块首写分隔标记 | 超长词表会静默截断，续块保证不丢词 |
+| 频率统计 | 反算每个词被多少个标签使用，只计触发词 | 「被几个标签复用」是治理决策的核心数字 |
+
+`compile_chunks` 的每块都带 `words` 字段，`chunk_word_coverage` 断言编译没丢词——
+把「悄悄少一个词」变成构建失败。
+
+切片策略与踩过的坑见 [`docs/rag-notes.md`](docs/rag-notes.md)。
+
 ## 测试在守护什么
 
 | 组 | 条数 | 覆盖 |
@@ -69,11 +87,12 @@ pip install -e ".[test]"
 | 时间与字段 | 6 | 分钟窗口、多小时展开、跨小时区间、单日折叠、字段别名补 ts、日期格式兼容 |
 | SQL / 摘要 / MIME | 6 | 空 IN、引号与反斜杠转义、分钟分区条件、HTML 表格摘要、超长截断、图片魔数 |
 | 跨框架一致 | 4 | 三个场景 × 三种编排，输出必须逐字段相同；挂起场景必须真的挂起 |
+| 知识库构建 | 17 | 只解析不执行、通道被引用才导出词、四类词角色推断、分块不丢词、df 只计触发词 |
 
 跨框架那 4 条是这个仓库的核心断言：`status / route / creatives / merged / message` 在三个实现之间必须完全
 一致。任何一处控制流写错——`RunnableBranch` 分支顺序颠倒、ADK 守卫漏判——都会在这里失败。
 
-用例刻意只写 25 条而不追求覆盖率：测的是会静默出错的地方，不是代码行。
+用例刻意只写 42 条而不追求覆盖率：测的是会静默出错的地方，不是代码行。
 
 ## 设计取舍
 
@@ -94,3 +113,4 @@ pip install -e ".[test]"
 
 - [`docs/architecture.md`](docs/architecture.md)：生产系统的分层、关键决策与失败模式
 - [`docs/case-studies.md`](docs/case-studies.md)：OOM、长任务恢复、口径漂移三个案例
+- [`docs/rag-notes.md`](docs/rag-notes.md)：从代码规则编译知识库时的切片策略与踩坑记录
